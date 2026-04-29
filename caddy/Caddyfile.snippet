@@ -1,0 +1,30 @@
+# Append this block to your existing Caddyfile.
+# Caddy auto-issues a Let's Encrypt cert for the hostname. Make sure
+# imageprocessing.digitalwert.net's A-record points to this host before
+# reloading Caddy.
+
+imageprocessing.digitalwert.net {
+    # Forward everything to the locally-bound MCP container
+    reverse_proxy 127.0.0.1:3789 {
+        # Streamable HTTP MCP uses Server-Sent Events on responses,
+        # so disable buffering and keep connections open.
+        flush_interval -1
+        transport http {
+            read_timeout 10m
+            write_timeout 10m
+        }
+    }
+
+    # Reasonable security headers (no auth here — auth is per-request via Bearer)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        # Drop "Server: Caddy" leak
+        -Server
+    }
+
+    # Optional: deny everything except /mcp and /health
+    @blocked not path /mcp /health
+    respond @blocked 404
+}

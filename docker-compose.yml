@@ -1,0 +1,26 @@
+# Example docker-compose for hosting alongside an existing Outline instance.
+# Adjust network names so this service can reach Outline by its internal hostname,
+# and put it behind your existing reverse proxy (Caddy / nginx / Traefik).
+
+services:
+  outline-attachments-mcp:
+    container_name: outline-attachments-mcp
+    build: .
+    restart: unless-stopped
+    environment:
+      # Internal Outline URL (no trailing slash). Must be reachable from this container.
+      # If Outline runs in the same compose project, use its service name:
+      #   OUTLINE_API_URL: http://outline:3000/api
+      # If it's on the same host but different compose, use the public URL:
+      OUTLINE_API_URL: https://knowledge-vault.digitalwert.net/api
+      PORT: "3000"
+    # Bind only to localhost — your reverse proxy terminates TLS and forwards here.
+    ports:
+      - "127.0.0.1:3789:3000"
+    # If you need to share Outline's docker network (when calling it by service name):
+    # networks:
+    #   - outline_default
+
+# networks:
+#   outline_default:
+#     external: true

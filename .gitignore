@@ -1,0 +1,11 @@
+# Node — never commit deps; package-lock IS committed for reproducible builds
+node_modules/
+*.log
+
+# Local env overrides (if you ever add a .env for local testing)
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db

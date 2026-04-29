@@ -1,0 +1,10 @@
+node_modules
+npm-debug.log
+.git
+.env
+.env.*
+*.log
+.DS_Store
+README.md
+docker-compose.yml
+caddy/
