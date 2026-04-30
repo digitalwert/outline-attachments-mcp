@@ -11,6 +11,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 const PORT = Number(process.env.PORT || 3000);
 const OUTLINE_API_URL = (process.env.OUTLINE_API_URL || "https://app.getoutline.com/api").replace(/\/$/, "");
 const REQUEST_BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || "2mb";
+// Hard cap on a single attachment download. Prevents a 50MB PDF from blowing
+// up the caller's conversation context (base64 inflates ~1.37x).
+const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 8 * 1024 * 1024);
 
 // ---------------------------------------------------------------------------
 // Per-request context (bearer token)
@@ -134,6 +137,46 @@ async function resolveSignedUrl(attachmentId) {
   throw new Error(`Unexpected response from Outline (HTTP ${res.status}): ${body.slice(0, 300)}`);
 }
 
+async function downloadAttachmentBytes(attachmentId) {
+  const signedUrl = await resolveSignedUrl(attachmentId);
+
+  const res = await fetch(signedUrl, { redirect: "follow" });
+  if (!res.ok) {
+    throw new Error(`Failed to download attachment from signed URL (HTTP ${res.status} ${res.statusText}).`);
+  }
+
+  // Pre-check via Content-Length when present, so we don't buffer giant files.
+  const declared = res.headers.get("content-length");
+  if (declared && Number(declared) > MAX_DOWNLOAD_BYTES) {
+    throw new Error(
+      `Attachment is ${declared} bytes which exceeds MAX_DOWNLOAD_BYTES (${MAX_DOWNLOAD_BYTES}).`
+    );
+  }
+
+  const arrayBuffer = await res.arrayBuffer();
+  if (arrayBuffer.byteLength > MAX_DOWNLOAD_BYTES) {
+    throw new Error(
+      `Attachment is ${arrayBuffer.byteLength} bytes which exceeds MAX_DOWNLOAD_BYTES (${MAX_DOWNLOAD_BYTES}).`
+    );
+  }
+
+  const mimeType =
+    (res.headers.get("content-type") || "application/octet-stream").split(";")[0].trim();
+
+  // Prefer filename from the response itself; fall back to URL/UUID heuristics.
+  const filename =
+    parseFilenameFromContentDisposition(res.headers.get("content-disposition")) ||
+    suggestFilenameFromUrl(signedUrl, attachmentId);
+
+  return {
+    id: attachmentId,
+    filename,
+    mime_type: mimeType,
+    size_bytes: arrayBuffer.byteLength,
+    content_base64: Buffer.from(arrayBuffer).toString("base64"),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // MCP server (one instance, request-scoped auth via AsyncLocalStorage)
 // ---------------------------------------------------------------------------
@@ -142,8 +185,8 @@ function buildMcpServer() {
   const server = new McpServer({ name: "outline-attachments", version: "1.0.0" });
 
   server.tool(
-    "resolve_attachment_url",
-    "Resolve a single Outline attachment ID to a short-lived signed download URL. The signed URL has temporary credentials embedded — fetch it from the user's local machine (e.g. via curl) to download the file. Use this when you already have a specific attachment UUID.",
+    "download_attachment",
+    "Download a single Outline attachment by ID. The MCP server fetches the file from Outline (via a short-lived signed URL) and returns the bytes inline as base64 along with metadata (filename, mime type, size). The caller is expected to write the bytes to a local temp file (e.g. `base64 -d > /tmp/<filename>`) and clean up after use. One image per call to keep token cost predictable.",
     {
       id: z
         .string()
@@ -155,15 +198,8 @@ function buildMcpServer() {
     async ({ id }) => {
       try {
         const attachmentId = extractAttachmentId(id);
-        const signedUrl = await resolveSignedUrl(attachmentId);
-        const suggested = suggestFilenameFromUrl(signedUrl, attachmentId);
-
-        const payload = {
-          id: attachmentId,
-          url: signedUrl,
-          suggested_filename: suggested,
-        };
-        return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+        const payload = await downloadAttachmentBytes(attachmentId);
+        return { content: [{ type: "text", text: JSON.stringify(payload) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }] };
       }
@@ -171,8 +207,8 @@ function buildMcpServer() {
   );
 
   server.tool(
-    "resolve_attachment_urls_from_text",
-    "Scan markdown or document text for Outline image attachments and return a signed download URL for each. Designed for the workflow: another tool (e.g. the Knowledge Base / Outline MCP) returns a document body, and this tool extracts every image attachment ID from it and resolves a signed URL per image. The caller (Claude on the user's machine) is then expected to download each URL locally with curl and pass file paths to a vision tool. Use this — not resolve_attachment_url — when you have the document body and want all its images at once.",
+    "find_image_attachments_in_text",
+    "Scan markdown or document text for Outline image attachments and return the list of attachment IDs (with optional alt text). This tool does NOT download anything — use it to enumerate which images a document contains, then call download_attachment(id) per image. Pair this with the Knowledge Base / Outline MCP: fetch document body there, list refs here, download one-by-one to keep token usage bounded.",
     {
       text: z
         .string()
@@ -185,42 +221,18 @@ function buildMcpServer() {
         .int()
         .positive()
         .optional()
-        .describe("Optional cap on how many attachments to resolve (in document order)."),
+        .describe("Optional cap on how many references to return (in document order)."),
     },
     async ({ text, limit }) => {
       try {
         const refs = extractImageAttachmentRefs(text);
-        if (refs.length === 0) {
-          return {
-            content: [{ type: "text", text: "No Outline image attachments found in the provided text." }],
-          };
-        }
         const work = limit ? refs.slice(0, limit) : refs;
-
-        const results = await Promise.all(
-          work.map(async (ref) => {
-            try {
-              const url = await resolveSignedUrl(ref.id);
-              return {
-                ok: true,
-                id: ref.id,
-                alt: ref.alt,
-                url,
-                suggested_filename: suggestFilenameFromUrl(url, ref.id),
-              };
-            } catch (err) {
-              return { ok: false, id: ref.id, alt: ref.alt, error: err.message };
-            }
-          })
-        );
-
-        const summary = {
+        const payload = {
           total_found: refs.length,
-          resolved: results.filter((r) => r.ok).length,
-          failed: results.filter((r) => !r.ok).length,
-          attachments: results,
+          returned: work.length,
+          attachments: work.map((r) => ({ id: r.id, alt: r.alt, source: r.source })),
         };
-        return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+        return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
       } catch (err) {
         return { content: [{ type: "text", text: `Error: ${err.message}` }] };
       }

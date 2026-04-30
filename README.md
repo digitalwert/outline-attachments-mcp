@@ -1,8 +1,9 @@
 # outline-attachments-mcp (server)
 
-HTTP MCP server that resolves Outline attachment IDs to short-lived signed download URLs.
-Designed to run **next to** the team's self-hosted Outline at `knowledge-vault.digitalwert.net`
-and be reached by Claude Code clients at `imageprocessing.digitalwert.net/mcp`.
+HTTP MCP server that downloads Outline attachments and returns the bytes inline to the
+caller. Designed to run **next to** the team's self-hosted Outline at
+`knowledge-vault.digitalwert.net` and be reached by Claude Code clients at
+`imageprocessing.digitalwert.net/mcp`.
 
 The service is **stateless and per-request authenticated**: every MCP call must carry the
 caller's own Outline API token in the `Authorization` header. The token is forwarded to
@@ -10,12 +11,16 @@ Outline, so Outline's own ACLs apply — the server never holds team-wide creden
 
 ## Tools exposed
 
-- `resolve_attachment_url(id)` — single attachment UUID → signed URL
-- `resolve_attachment_urls_from_text(text, limit?)` — scans markdown for image attachments, returns one signed URL per image
+- `download_attachment(id)` — fetches the file from Outline server-side and returns
+  `{ id, filename, mime_type, size_bytes, content_base64 }`. The caller is expected to
+  decode the base64 into a local temp file and remove it after use.
+- `find_image_attachments_in_text(text, limit?)` — scans markdown for image attachment
+  refs and returns the list of IDs (with alt text). Does **not** download. Pair with
+  `download_attachment` per image to keep token usage bounded.
 
-The server **does not** download files itself. The caller (Claude on the user's machine)
-fetches each signed URL with `curl` and processes locally — this preserves the
-"no Claude vision tokens" property when paired with `/local-vision`.
+The server downloads each file once on the server side and streams it back to the caller
+as base64. There is a hard `MAX_DOWNLOAD_BYTES` cap (default 8 MiB) to keep a single
+oversized attachment from blowing up the conversation context.
 
 ## Deployment (Docker + Caddy)
 
@@ -77,6 +82,7 @@ Environment variables (see `docker-compose.yml`):
 | `PORT` | `3000` | Port the Express app listens on inside the container |
 | `OUTLINE_API_URL` | `https://app.getoutline.com/api` | **Set this** to your self-hosted Outline API URL (no trailing slash) |
 | `REQUEST_BODY_LIMIT` | `2mb` | Max request body size (Express `json` middleware) |
+| `MAX_DOWNLOAD_BYTES` | `8388608` (8 MiB) | Refuse to inline-return any attachment larger than this. base64 inflates ~1.37×, so the wire payload is bounded at ~11.5 MiB. |
 
 ## Security model
 

@@ -14,6 +14,9 @@ services:
       # If it's on the same host but different compose, use the public URL:
       OUTLINE_API_URL: https://knowledge-vault.digitalwert.net/api
       PORT: "3000"
+      # Hard cap on a single inline-returned attachment (bytes). Default 8 MiB.
+      # Bumped uploads (e.g. PDFs) should still be fetched via curl + signed URL.
+      MAX_DOWNLOAD_BYTES: "8388608"
     # Bind only to localhost — your reverse proxy terminates TLS and forwards here.
     ports:
       - "127.0.0.1:3789:3000"
