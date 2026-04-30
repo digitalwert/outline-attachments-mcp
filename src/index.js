@@ -3,6 +3,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// Resolve package version once at startup so /health can advertise the running build.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
+
+// Single source of truth for the tool surface — used both for registration and
+// for /health diagnostics so deploys can be verified from outside the container.
+const TOOL_NAMES = ["download_attachment", "find_image_attachments_in_text"];
 
 // ---------------------------------------------------------------------------
 // Config
@@ -256,9 +267,17 @@ function parseBearer(req) {
 const app = express();
 app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
 
-// Health for monitoring / load balancer
+// Health for monitoring / load balancer.
+// Includes version + tool surface so external smoke-tests can verify which build
+// is actually running without needing an Outline token.
 app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok", outline_api: OUTLINE_API_URL });
+  res.status(200).json({
+    status: "ok",
+    version: PKG.version,
+    outline_api: OUTLINE_API_URL,
+    tools: TOOL_NAMES,
+    max_download_bytes: MAX_DOWNLOAD_BYTES,
+  });
 });
 
 // MCP endpoint
