@@ -148,12 +148,36 @@ async function resolveSignedUrl(attachmentId) {
   throw new Error(`Unexpected response from Outline (HTTP ${res.status}): ${body.slice(0, 300)}`);
 }
 
+// Strip the signed-URL query string before logging or surfacing to a caller —
+// it carries short-lived credentials we never want to leak.
+function safeUrlForLog(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return "<unparseable url>";
+  }
+}
+
 async function downloadAttachmentBytes(attachmentId) {
   const signedUrl = await resolveSignedUrl(attachmentId);
+  const safeUrl = safeUrlForLog(signedUrl);
 
-  const res = await fetch(signedUrl, { redirect: "follow" });
+  let res;
+  try {
+    res = await fetch(signedUrl, { redirect: "follow" });
+  } catch (err) {
+    // fetch() throws a TypeError with a wrapped `cause` for network/DNS/TLS issues.
+    // Surface enough to debug from the caller without leaking the signed URL itself.
+    const causeMsg = err?.cause?.code || err?.cause?.message || err?.message || String(err);
+    console.error(`download_attachment fetch failed: ${attachmentId} -> ${safeUrl} :: ${causeMsg}`);
+    throw new Error(`Could not reach signed URL for ${safeUrl}: ${causeMsg}`);
+  }
+
   if (!res.ok) {
-    throw new Error(`Failed to download attachment from signed URL (HTTP ${res.status} ${res.statusText}).`);
+    throw new Error(
+      `Failed to download attachment from signed URL ${safeUrl} (HTTP ${res.status} ${res.statusText}).`
+    );
   }
 
   // Pre-check via Content-Length when present, so we don't buffer giant files.
